@@ -1,0 +1,5 @@
+{
+  "name": "DataExtract AI",
+  "description": "A high-fidelity prototype for an AI-powered document extraction, ETL workflow automation, and data verification platform.",
+  "requestFramePermissions": []
+}
