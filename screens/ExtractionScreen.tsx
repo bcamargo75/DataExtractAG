@@ -1,6 +1,9 @@
 import React, { useRef, useState, useEffect } from 'react';
-
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../AuthContext';
+import { supabase } from '../supabaseClient';
 import * as pdfjsLib from 'pdfjs-dist';
+import { ThemeToggle } from '../ThemeToggle';
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs';
@@ -42,7 +45,26 @@ interface BatchResult {
     status: 'success' | 'error';
 }
 
+interface SavedTemplate {
+    id: string;
+    name: string;
+    version: number;
+    definition: TemplateField[];
+    pdf_assets: {
+        storage_path: string;
+        original_filename: string;
+    };
+}
+
 const ExtractionScreen = () => {
+    const { session, signOut } = useAuth();
+    const navigate = useNavigate();
+
+    const handleLogout = async () => {
+        await signOut();
+        navigate('/');
+    };
+
     // Dashboard States
     const fileInputRef = useRef<HTMLInputElement>(null);
     const batchInputRef = useRef<HTMLInputElement>(null);
@@ -63,6 +85,34 @@ const ExtractionScreen = () => {
     // Save Modal State
     const [showSaveModal, setShowSaveModal] = useState(false);
     const [templateName, setTemplateName] = useState('');
+    const [isSaving, setIsSaving] = useState(false);
+
+    // Template List State
+    const [templates, setTemplates] = useState<SavedTemplate[]>([]);
+    const [loadingTemplates, setLoadingTemplates] = useState(false);
+    const [currentTemplateId, setCurrentTemplateId] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (session?.user) {
+            fetchTemplates();
+        }
+    }, [session]);
+
+    const fetchTemplates = async () => {
+        setLoadingTemplates(true);
+        const { data, error } = await supabase
+            .from('templates')
+            .select('*, pdf_assets(storage_path, original_filename)')
+            .eq('user_id', session!.user.id)
+            .order('created_at', { ascending: false });
+
+        if (error) {
+            console.error('Error fetching templates:', error);
+        } else {
+            setTemplates(data || []);
+        }
+        setLoadingTemplates(false);
+    };
 
     // Batch Processing State
     const [showBatchModal, setShowBatchModal] = useState(false);
@@ -140,6 +190,8 @@ const ExtractionScreen = () => {
         if (selectedFile) {
             if (selectedFile.type === 'application/pdf') {
                 setFile(selectedFile);
+                setCurrentTemplateId(null);
+                setTemplateName('');
                 loadPdf(selectedFile);
             } else {
                 alert("Por favor sube un archivo PDF para usar el editor de plantillas.");
@@ -148,14 +200,16 @@ const ExtractionScreen = () => {
     };
 
     // --- LOGIC: PDF Loading & Rendering ---
-    const loadPdf = async (file: File) => {
+    const loadPdf = async (file: File, keepFields = false) => {
         const arrayBuffer = await file.arrayBuffer();
         try {
             const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
             const doc = await loadingTask.promise;
             setPdfDoc(doc);
             setPageNum(1);
-            setTemplateFields([]);
+            if (!keepFields) {
+                setTemplateFields([]);
+            }
             setTempSelection(null);
         } catch (error) {
             console.error("Error loading PDF:", error);
@@ -289,6 +343,8 @@ const ExtractionScreen = () => {
         setTemplateFields([]);
         setTextItems([]);
         setTempSelection(null);
+        setCurrentTemplateId(null);
+        setTemplateName('');
     };
 
     const handleSaveTemplate = () => {
@@ -301,11 +357,126 @@ const ExtractionScreen = () => {
         setShowSaveModal(true);
     };
 
-    const confirmSave = () => {
+    const confirmSave = async () => {
         if (!templateName.trim()) return;
-        console.log("Saving template:", { name: templateName, fields: templateFields });
-        setShowSaveModal(false);
-        alert(`Plantilla "${templateName}" guardada correctamente con ${templateFields.length} campos.`);
+        if (!file || !session?.user) return;
+
+        setIsSaving(true);
+
+        try {
+            const user = session.user;
+            const pdfAssetId = crypto.randomUUID();
+            const path = `${user.id}/${pdfAssetId}.pdf`;
+
+            // 1) Storage upload (Always upload to ensure we have the file)
+            const { error: uploadError } = await supabase.storage
+                .from("template-pdfs")
+                .upload(path, file, {
+                    contentType: "application/pdf",
+                    upsert: true,
+                });
+
+            if (uploadError) throw uploadError;
+
+            // 2) Manage Assets & Template
+            if (currentTemplateId) {
+                // UPDATE existing template
+                // Note: We are creating a NEW asset for the PDF even if it's the same file, to keep it simple and immutable history if needed.
+                // Or we could try to reuse if we didn't change the file, but we don't track file changes easily here.
+
+                // Insert new asset
+                const { error: assetError } = await supabase.from("pdf_assets").insert({
+                    id: pdfAssetId,
+                    user_id: user.id,
+                    storage_path: path,
+                    original_filename: file.name,
+                });
+                if (assetError) throw assetError;
+
+                const { error: updateError } = await supabase
+                    .from("templates")
+                    .update({
+                        name: templateName,
+                        pdf_asset_id: pdfAssetId, // Point to potentially new/same file
+                        definition: templateFields,
+                        version: 1 // We could increment if we tracked it
+                    })
+                    .eq('id', currentTemplateId);
+
+                if (updateError) throw updateError;
+
+            } else {
+                // CREATE new template
+                const { error: assetError } = await supabase.from("pdf_assets").insert({
+                    id: pdfAssetId,
+                    user_id: user.id,
+                    storage_path: path,
+                    original_filename: file.name,
+                });
+                if (assetError) throw assetError;
+
+                const { error: templateError } = await supabase.from("templates").insert({
+                    user_id: user.id,
+                    pdf_asset_id: pdfAssetId,
+                    name: templateName,
+                    version: 1,
+                    definition: templateFields,
+                });
+                if (templateError) throw templateError;
+            }
+
+            alert(`Plantilla "${templateName}" guardada correctamente.`);
+            setShowSaveModal(false);
+            fetchTemplates(); // Refresh list
+
+        } catch (error: any) {
+            console.error("Error saving template:", error);
+            alert(`Error al guardar: ${error.message || "Intente nuevamente."}`);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const handleDeleteTemplate = async (id: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!confirm('¿Estás seguro de eliminar esta plantilla?')) return;
+
+        const { error } = await supabase.from('templates').delete().eq('id', id);
+        if (error) {
+            alert('Error al eliminar');
+        } else {
+            fetchTemplates();
+        }
+    };
+
+    const handleLoadTemplate = async (template: SavedTemplate, mode: 'edit' | 'batch') => {
+        try {
+            // Download PDF
+            const { data, error } = await supabase.storage
+                .from('template-pdfs')
+                .download(template.pdf_assets.storage_path);
+
+            if (error || !data) throw error || new Error("No data");
+
+            const file = new File([data], template.pdf_assets.original_filename, { type: 'application/pdf' });
+
+            // Set State
+            setFile(file);
+            setTemplateFields(template.definition);
+            setCurrentTemplateId(template.id);
+            setTemplateName(template.name);
+
+            // Load and Render
+            await loadPdf(file, true);
+
+            if (mode === 'batch') {
+                setTimeout(() => openBatchModal(), 500); // Small delay to ensure state is ready
+            }
+
+        } catch (error) {
+            console.error("Error loading template:", error);
+            alert("No se pudo cargar la plantilla (posiblemente el archivo fue borrado del storage).");
+        }
     };
 
     // --- BATCH PROCESSING LOGIC ---
@@ -448,19 +619,101 @@ const ExtractionScreen = () => {
                         <div className="flex items-center gap-4">
                             <h2 className="text-lg font-bold text-slate-900 dark:text-white">Panel de Extracción</h2>
                         </div>
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-4">
+                            {/* User Profile */}
+                            <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-surface-dark border border-slate-200 dark:border-border-dark">
+                                {session?.user?.user_metadata?.avatar_url && (
+                                    <img
+                                        src={session.user.user_metadata.avatar_url}
+                                        alt="Avatar"
+                                        className="size-8 rounded-full border border-slate-300 dark:border-slate-600"
+                                    />
+                                )}
+                                <div className="hidden sm:block text-right">
+                                    <p className="text-xs font-bold text-slate-700 dark:text-white leading-none">
+                                        {session?.user?.user_metadata?.full_name || session?.user?.email}
+                                    </p>
+                                    <p className="text-[10px] text-slate-500 dark:text-text-secondary leading-none mt-1">Usuario</p>
+                                </div>
+                            </div>
+
+                            <button
+                                onClick={handleLogout}
+                                className="flex items-center justify-center size-9 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
+                                title="Cerrar Sesión"
+                            >
+                                <span className="material-symbols-outlined">logout</span>
+                            </button>
+
+                            <div className="h-6 w-px bg-slate-200 dark:bg-border-dark mx-1"></div>
+
                             <button
                                 onClick={handleUploadClick}
                                 className="flex items-center gap-2 px-4 py-2 bg-primary hover:bg-primary/90 text-white text-sm font-bold rounded-lg shadow-lg shadow-primary/20 transition-colors"
                             >
                                 <span className="material-symbols-outlined text-[20px]">add</span>
-                                <span>Nuevo Documento</span>
+                                <span>Nuevo</span>
                             </button>
                         </div>
                     </header>
 
                     <div className="flex-1 p-6 overflow-y-auto">
 
+
+                        <div className="mt-8">
+                            <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4">Mis Plantillas</h3>
+
+                            {loadingTemplates ? (
+                                <div className="text-center py-8 text-slate-500">Cargando plantillas...</div>
+                            ) : templates.length === 0 ? (
+                                <div className="text-center py-8 bg-slate-50 dark:bg-surface-dark border border-dashed border-slate-200 dark:border-border-dark rounded-xl text-slate-500">
+                                    No tienes plantillas guardadas. Sube un documento para comenzar.
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                    {templates.map(tpl => (
+                                        <div key={tpl.id} className="bg-white dark:bg-surface-dark border border-slate-200 dark:border-border-dark rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow group relative">
+                                            <div className="flex items-start justify-between mb-2">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="p-2 bg-primary/10 text-primary rounded-lg">
+                                                        <span className="material-symbols-outlined">description</span>
+                                                    </div>
+                                                    <div>
+                                                        <h4 className="font-bold text-slate-900 dark:text-white leading-tight">{tpl.name}</h4>
+                                                        <p className="text-xs text-slate-500 dark:text-text-secondary truncate max-w-[150px]" title={tpl.pdf_assets?.original_filename}>
+                                                            {tpl.pdf_assets?.original_filename || "Sin archivo"}
+                                                        </p>
+                                                        <p className="text-[10px] text-slate-400 mt-1 truncate max-w-[180px]">
+                                                            {tpl.definition?.length || 0} campos: {tpl.definition?.map(f => f.name).join(', ') || 'Sin campos'}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <div className="flex gap-1">
+                                                    <button
+                                                        onClick={(e) => handleDeleteTemplate(tpl.id, e)}
+                                                        className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 rounded transition-colors"
+                                                        title="Eliminar"
+                                                    >
+                                                        <span className="material-symbols-outlined text-lg">delete</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-4 flex gap-2">
+                                                <button
+                                                    onClick={() => handleLoadTemplate(tpl, 'edit')}
+                                                    className="flex-1 py-1.5 px-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1"
+                                                >
+                                                    <span className="material-symbols-outlined text-[16px]">edit</span>
+                                                    Editar / Usar Plantilla
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                        </div>
 
                         <div className="mt-8">
                             <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-4">Subir Documentos</h3>
@@ -491,17 +744,41 @@ const ExtractionScreen = () => {
     return (
         <div className="bg-background-light dark:bg-background-dark h-screen flex flex-col overflow-hidden relative">
             {/* Editor Header */}
-            <header className="h-16 flex items-center justify-between px-6 border-b border-border-dark bg-[#111a22] shrink-0 text-white z-20">
-                <div className="flex items-center gap-4">
-                    <button onClick={closeEditor} className="p-2 hover:bg-white/10 rounded-full transition-colors text-text-secondary hover:text-white">
+            <header className="h-16 flex items-center justify-between px-6 border-b border-slate-200 dark:border-border-dark bg-white dark:bg-[#111a22] shrink-0 z-20 transition-colors">
+                <div className="flex items-center gap-4 text-slate-900 dark:text-white">
+                    <button onClick={closeEditor} className="p-2 hover:bg-slate-100 dark:hover:bg-white/10 rounded-full transition-colors text-slate-500 dark:text-text-secondary">
                         <span className="material-symbols-outlined">arrow_back</span>
                     </button>
                     <div>
                         <h2 className="text-sm font-bold leading-tight">{file.name}</h2>
-                        <p className="text-xs text-text-secondary">Editor de Plantillas</p>
+                        <p className="text-xs text-slate-500 dark:text-text-secondary">Editor de Plantillas</p>
                     </div>
                 </div>
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-3">
+                    <ThemeToggle />
+                    {/* User Profile Mini */}
+                    <div className="flex items-center gap-2 mr-2 opacity-80 hover:opacity-100 transition-opacity text-slate-900 dark:text-white">
+                        {session?.user?.user_metadata?.avatar_url && (
+                            <img
+                                src={session.user.user_metadata.avatar_url}
+                                alt="Avatar"
+                                className="size-7 rounded-full border border-slate-600"
+                            />
+                        )}
+                        <span className="text-xs font-bold hidden xl:block max-w-[100px] truncate">
+                            {session?.user?.user_metadata?.full_name?.split(' ')[0]}
+                        </span>
+                        <button
+                            onClick={handleLogout}
+                            className="text-slate-400 hover:text-red-400 ml-1"
+                            title="Cerrar Sesión"
+                        >
+                            <span className="material-symbols-outlined text-[18px]">logout</span>
+                        </button>
+                    </div>
+
+                    <div className="h-6 w-px bg-white/10 mx-1"></div>
+
                     <div className="flex items-center bg-surface-dark rounded-lg p-1 border border-border-dark/50">
                         <button onClick={() => setScale(s => Math.max(0.5, s - 0.1))} className="p-1.5 hover:bg-white/10 rounded transition-colors text-text-secondary">
                             <span className="material-symbols-outlined text-[18px]">remove</span>
@@ -513,17 +790,17 @@ const ExtractionScreen = () => {
                     </div>
                     <button
                         onClick={openBatchModal}
-                        className="flex items-center gap-2 px-4 py-2 bg-surface-dark border border-border-dark hover:bg-[#233648] text-white text-sm font-bold rounded-lg transition-colors"
+                        className="flex items-center gap-2 px-3 py-1.5 bg-surface-dark border border-border-dark hover:bg-[#233648] text-white text-xs font-bold rounded-lg transition-colors"
                     >
                         <span className="material-symbols-outlined text-[18px]">copy_all</span>
-                        <span>Procesar Lote</span>
+                        <span className="hidden lg:inline">Lote</span>
                     </button>
                     <button
                         onClick={handleSaveTemplate}
-                        className="flex items-center gap-2 px-4 py-2 bg-primary hover:bg-primary/90 text-white text-sm font-bold rounded-lg transition-colors"
+                        className="flex items-center gap-2 px-3 py-1.5 bg-primary hover:bg-primary/90 text-white text-xs font-bold rounded-lg transition-colors"
                     >
                         <span className="material-symbols-outlined text-[18px]">save</span>
-                        <span>Guardar Plantilla</span>
+                        <span className="hidden lg:inline">Guardar</span>
                     </button>
                 </div>
             </header>
@@ -705,9 +982,11 @@ const ExtractionScreen = () => {
                             </button>
                             <button
                                 onClick={confirmSave}
-                                className="px-6 py-2 bg-primary hover:bg-primary/90 text-white font-bold rounded-lg shadow-lg shadow-primary/25 transition-all"
+                                disabled={isSaving}
+                                className="px-6 py-2 bg-primary hover:bg-primary/90 text-white font-bold rounded-lg shadow-lg shadow-primary/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                             >
-                                Guardar
+                                {isSaving && <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>}
+                                {isSaving ? "Guardando..." : "Guardar"}
                             </button>
                         </div>
                     </div>

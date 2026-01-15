@@ -1,22 +1,36 @@
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../AuthContext';
+import { ThemeToggle } from '../ThemeToggle'; // Import Toggle
 
 const LandingScreen = () => {
+    const { session, signOut } = useAuth();
     const navigate = useNavigate();
 
     const enterDemoMode = () => {
-        localStorage.setItem('is_demo_mode', 'true');
-        // Optional: Reset counters on fresh entry if needed, 
-        // but keeping history is better for testing limits unless explicitly reset.
-        if (!localStorage.getItem('demo_pdf_count')) {
-            localStorage.setItem('demo_pdf_count', '0');
+        if (session) {
+            navigate('/app');
+        } else {
+            navigate('/login');
         }
-        navigate('/app');
     };
+
+    const handleLogout = async () => {
+        await signOut();
+    };
+
+    // Redirect to App if logged in
+    React.useEffect(() => {
+        if (session) {
+            navigate('/app');
+        }
+    }, [session, navigate]);
+
+
 
     return (
         <div className="h-screen overflow-y-auto bg-background-light dark:bg-background-dark text-slate-900 dark:text-white font-display flex flex-col scroll-smooth">
-            
+
             {/* Navigation */}
             <nav className="fixed w-full z-50 bg-white/80 dark:bg-[#111a22]/80 backdrop-blur-md border-b border-slate-200 dark:border-border-dark">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -28,12 +42,46 @@ const LandingScreen = () => {
                             <span className="font-bold text-lg tracking-tight">DataExtract</span>
                         </div>
                         <div className="flex items-center gap-4">
-                            <Link to="/login" className="text-sm font-medium text-slate-600 dark:text-text-secondary hover:text-primary transition-colors">
-                                Ingresar
-                            </Link>
-                            <Link to="/register" className="px-4 py-2 rounded-lg bg-primary hover:bg-blue-600 text-white text-sm font-bold transition-colors shadow-lg shadow-primary/20">
-                                Registrarme
-                            </Link>
+                            <ThemeToggle /> {/* Add Toggle */}
+                            {session ? (
+                                <div className="flex items-center gap-4 animate-in fade-in duration-300">
+                                    <Link to="/app" className="hidden sm:flex items-center gap-3 px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-surface-dark border border-slate-200 dark:border-border-dark hover:border-primary/50 transition-colors">
+                                        {session?.user?.user_metadata?.avatar_url && (
+                                            <img
+                                                src={session.user.user_metadata.avatar_url}
+                                                alt="Avatar"
+                                                className="size-8 rounded-full border border-slate-300 dark:border-slate-600"
+                                            />
+                                        )}
+                                        <div className="text-right">
+                                            <p className="text-xs font-bold text-slate-700 dark:text-white leading-none">
+                                                {session?.user?.user_metadata?.full_name || session?.user?.email}
+                                            </p>
+                                        </div>
+                                    </Link>
+
+                                    <button
+                                        onClick={handleLogout}
+                                        className="text-sm font-bold text-slate-500 hover:text-red-500 transition-colors"
+                                    >
+                                        Salir
+                                    </button>
+
+                                    <Link
+                                        to="/app"
+                                        className="px-4 py-2 bg-primary hover:bg-blue-600 text-white text-sm font-bold rounded-lg transition-colors shadow-lg shadow-primary/20"
+                                    >
+                                        Ir a la App
+                                    </Link>
+                                </div>
+                            ) : (
+                                <Link
+                                    to="/login"
+                                    className="text-sm font-bold text-slate-700 dark:text-white hover:text-primary transition-colors"
+                                >
+                                    Ingresar
+                                </Link>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -42,8 +90,8 @@ const LandingScreen = () => {
             {/* Hero Section */}
             <section className="pt-40 pb-80 md:pt-48 md:pb-96 px-4 sm:px-6 lg:px-8 relative overflow-hidden">
                 <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-full max-w-7xl pointer-events-none opacity-30 dark:opacity-20 z-0">
-                     <div className="absolute top-20 left-20 w-72 h-72 bg-primary rounded-full filter blur-[100px]"></div>
-                     <div className="absolute bottom-20 right-20 w-72 h-72 bg-purple-500 rounded-full filter blur-[100px]"></div>
+                    <div className="absolute top-20 left-20 w-72 h-72 bg-primary rounded-full filter blur-[100px]"></div>
+                    <div className="absolute bottom-20 right-20 w-72 h-72 bg-purple-500 rounded-full filter blur-[100px]"></div>
                 </div>
 
                 <div className="max-w-4xl mx-auto text-center relative z-30">
@@ -57,13 +105,9 @@ const LandingScreen = () => {
                         Automatiza la entrada de datos, elimina errores manuales y procesa lotes de PDFs con plantillas inteligentes personalizables.
                     </p>
                     <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pb-4">
-                        <button onClick={enterDemoMode} className="w-full sm:w-auto px-8 py-4 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-lg transition-all shadow-xl shadow-amber-500/25 transform hover:-translate-y-1 flex items-center justify-center gap-2">
-                            <span className="material-symbols-outlined">science</span>
-                            Probar Demo
+                        <button onClick={enterDemoMode} className="w-full sm:w-auto px-8 py-4 rounded-xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-lg transition-all shadow-xl shadow-orange-500/25 transform hover:-translate-y-1 flex items-center justify-center gap-2">
+                            Comenzar
                         </button>
-                        <Link to="/register" className="w-full sm:w-auto px-8 py-4 rounded-xl bg-primary hover:bg-blue-600 text-white font-bold text-lg transition-all shadow-xl shadow-primary/25 transform hover:-translate-y-1">
-                            Comenzar Gratis
-                        </Link>
                     </div>
                 </div>
             </section>
@@ -116,9 +160,7 @@ const LandingScreen = () => {
                             <p className="text-slate-500 dark:text-text-secondary mb-8 leading-relaxed">
                                 Deja de perder tiempo transcribiendo datos manualmente. Nuestra herramienta te permite organizar tus documentos de manera eficiente.
                             </p>
-                            <Link to="/register" className="inline-flex items-center gap-2 text-primary font-bold hover:gap-3 transition-all">
-                                Empieza ahora <span className="material-symbols-outlined text-sm">arrow_forward</span>
-                            </Link>
+                            {/* Link removed per request */}
                         </div>
                         <div className="col-span-1 lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
                             <div className="flex gap-4 items-start">
@@ -202,7 +244,7 @@ const LandingScreen = () => {
             <footer className="bg-white dark:bg-[#111a22] border-t border-slate-200 dark:border-border-dark py-12 px-4">
                 <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
                     <div className="flex items-center gap-2">
-                         <div className="bg-center bg-no-repeat bg-cover rounded-full size-6 bg-primary/20 flex items-center justify-center text-primary">
+                        <div className="bg-center bg-no-repeat bg-cover rounded-full size-6 bg-primary/20 flex items-center justify-center text-primary">
                             <span className="material-symbols-outlined text-sm">dataset</span>
                         </div>
                         <span className="font-bold text-slate-700 dark:text-white">DataExtract</span>
